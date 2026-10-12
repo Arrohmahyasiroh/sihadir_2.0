@@ -1,12 +1,72 @@
 <!DOCTYPE html>
-<html>
+<html lang="id">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SIHADIR 2.0</title>
-<style>html,body{margin:0;padding:0;height:100%}iframe{border:0;width:100%;height:100%}</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SIHADIR 2.0 - SDIT Ar Rohmah</title>
+
+  <!-- Redirect otomatis ke aplikasi -->
+  <meta http-equiv="refresh" content="2; url=https://script.google.com/macros/s/AKfycbywlfYqUQiOvTc7aCNVdYher1EuqT-nwTc--Kda3n1AYPsFqGlWg2Y_5-Ge7jNt7Yy2SQ/exec">
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #1a237e, #1565c0);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      text-align: center;
+      padding: 20px;
+    }
+    .card {
+      background: rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      padding: 40px 32px;
+      max-width: 360px;
+      width: 100%;
+    }
+    .logo {
+      font-size: 3rem;
+      margin-bottom: 16px;
+    }
+    h1 { font-size: 1.6rem; font-weight: 800; margin-bottom: 6px; }
+    .subtitle { font-size: .85rem; opacity: .75; margin-bottom: 28px; }
+    .loading {
+      width: 40px; height: 40px;
+      border: 3px solid rgba(255,255,255,.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .info { font-size: .78rem; opacity: .65; margin-bottom: 20px; }
+    .btn {
+      display: inline-block;
+      background: white;
+      color: #1a237e;
+      padding: 12px 28px;
+      border-radius: 10px;
+      font-weight: 700;
+      text-decoration: none;
+      font-size: .9rem;
+    }
+  </style>
 </head>
 <body>
-<iframe src="https://script.google.com/macros/s/AKfycbywlfYqUQiOvTc7aCNVdYher1EuqT-nwTc--Kda3n1AYPsFqGlWg2Y_5-Ge7jNt7Yy2SQ/exec" allow="geolocation"></iframe>
+  <div class="card">
+    <div class="logo">🏫</div>
+    <h1>SIHADIR</h1>
+    <div class="subtitle">Sistem Informasi Kehadiran<br>SDIT Ar Rohmah Magetan</div>
+    <div class="loading"></div>
+    <div class="info">Mengalihkan ke aplikasi...</div>
+    <a class="btn" href="https://script.google.com/macros/s/AKfycbywlfYqUQiOvTc7aCNVdYher1EuqT-nwTc--Kda3n1AYPsFqGlWg2Y_5-Ge7jNt7Yy2SQ/exec">
+      Buka Aplikasi →
+    </a>
+  </div>
 </body>
 </html>
