@@ -1,0 +1,769 @@
+// ============================================================
+//  Admin.gs — semua fungsi admin (dashboard, approval, CRUD
+//  user, settings, rekap). Setiap fungsi wajib requireAdmin().
+// ============================================================
+
+// ─── ADMIN: DASHBOARD DATA ────────────────────────────────
+function getDashboardData(token) {
+  try {
+    requireAdmin(token);
+    const now = new Date();
+    const tanggal = Utilities.formatDate(now, 'Asia/Jakarta', 'yyyy-MM-dd');
+    const users = getSheetData(SHEET_NAMES.USER).filter(isPegawaiAktif_);
+    const absensi = getSheetData(SHEET_NAMES.ABSENSI);
+    const izin = getSheetData(SHEET_NAMES.IZIN);
+
+    const absenHari = absensi.filter(a => {
+      if (!a.Tanggal) return false;
+      const d = new Date(a.Tanggal);
+      return !isNaN(d) && Utilities.formatDate(d, 'Asia/Jakarta', 'yyyy-MM-dd') === tanggal;
+    });
+    const izinDisetujui = izin.filter(a => {
+      if (a.Status !== 'DISETUJUI' || !a.TanggalMulai || !a.TanggalSelesai) return false;
+      const m = new Date(a.TanggalMulai), s = new Date(a.TanggalSelesai), t = new Date(tanggal);
+      return !isNaN(m) && !isNaN(s) && m <= t && t <= s;
+    });
+
+    const hadir = absenHari.map(a => a.UserID);
+    const izinIDs = izinDisetujui.map(a => a.UserID);
+    const tidakMasuk = users.filter(u => !hadir.includes(u.ID) && !izinIDs.includes(u.ID));
+    const izinHari = users.filter(u => izinIDs.includes(u.ID));
+
+    const rekap7 = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now); d.setDate(d.getDate() - i);
+      const ds = Utilities.formatDate(d, 'Asia/Jakarta', 'yyyy-MM-dd');
+      const abs = absensi.filter(a => {
+        if (!a.Tanggal) return false;
+        const t = new Date(a.Tanggal);
+        return !isNaN(t) && Utilities.formatDate(t, 'Asia/Jakarta', 'yyyy-MM-dd') === ds;
+      });
+      rekap7.push({ tanggal: ds, hadir: abs.length, total: users.length });
+    }
+
+    const pendingIzin = izin.filter(a => a.Status === 'MENUNGGU').length;
+
+    // Keterlambatan hari ini: yang StatusMasuk-nya TERLAMBAT (untuk kartu "Terlambat" dashboard admin).
+    const mapelByID = {};
+    users.forEach(u => { mapelByID[u.ID] = u.MapelJabatan; });
+    const telatHari = absenHari.filter(a => a.StatusMasuk === 'TERLAMBAT');
+
+    return {
+      success: true,
+      totalGuru: users.length,
+      hadirHari: hadir.length,
+      terlambatHari: telatHari.length,
+      izinHari: izinHari.length,
+      tidakMasuk: tidakMasuk.length,
+      detailTidakMasuk: tidakMasuk.map(u => ({ id: u.ID, nama: u.Nama, mapel: u.MapelJabatan })),
+      detailIzin: izinHari.map(u => ({ id: u.ID, nama: u.Nama, mapel: u.MapelJabatan })),
+      detailTerlambat: telatHari.map(a => ({ id: a.UserID, nama: a.Nama, mapel: mapelByID[a.UserID] || '', waktuMasuk: a.WaktuMasuk })),
+      rekap7,
+      pendingIzin,
+      absenHariIni: absenHari.map(a => ({ nama: a.Nama, waktuMasuk: a.WaktuMasuk, status: a.StatusMasuk, lokasi: a.LokasiMasuk }))
+    };
+  } catch(e) {
+    return { success: false, message: e.message };
+  }
+}
+
+// ─── ADMIN: SEMUA DATA ABSENSI ────────────────────────────
+
+// ─── ADMIN: SEMUA DATA ABSENSI ────────────────────────────
+// ─── ADMIN: RESET DATABASE (kecuali Users, Settings, MasterData) ──
+// Menghapus SEMUA baris data (baris 2 dst) pada sheet transaksi & sistem:
+// Absensi, Izin, LaporanMengajar, Kegiatan, Log, Sessions, LoginFailures.
+// Sheet Users, Settings, MasterData TIDAK disentuh.
+// Proteksi: wajib admin + wajib konfirmasi kode "HAPUS" dari client.
+function resetDatabase(token, kode) {
+  try {
+    const session = requireAdmin(token);
+    if (String(kode || '').toUpperCase() !== 'HAPUS') {
+      return { success: false, message: 'Kode konfirmasi salah. Ketik HAPUS untuk melanjutkan.' };
+    }
+    const lock = LockService.getScriptLock();
+    let terkunci = false;
+    try { lock.waitLock(15000); terkunci = true; }
+    catch (err) { return { success: false, message: 'Sistem sedang sibuk. Coba lagi sebentar.' }; }
+    try {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      // HAPUS data transaksi saja — Sessions & LoginFailures DIPERTAHANKAN agar admin
+      // yang sedang reset tidak ikut ter-logout (bug: dashboard muter setelah reset
+      // karena token sesi sendiri ikut terhapus lalu semua request ditolak).
+      const target = [
+        SHEET_NAMES.ABSENSI, SHEET_NAMES.IZIN, SHEET_NAMES.LAPORAN,
+        SHEET_NAMES.KEGIATAN, SHEET_NAMES.LOG
+      ];
+      const hasil = [];
+      target.forEach(nama => {
+        const sh = ss.getSheetByName(nama);
+        if (!sh) { hasil.push(nama + ': tidak ada (dilewati)'); return; }
+        const last = sh.getLastRow();
+        if (last < 2) { hasil.push(nama + ': sudah kosong'); return; }
+        sh.deleteRows(2, last - 1); // hapus baris 2..terakhir, header baris 1 aman
+        hasil.push(nama + ': ' + (last - 1) + ' baris dihapus');
+      });
+      let adminNama = 'Admin';
+      try {
+        const users = getSheetData(SHEET_NAMES.USER);
+        const a = users.find(u => u.ID === session.userID);
+        if (a) adminNama = a.Nama;
+      } catch(e) {}
+      // Tulis log SETELAH reset (sheet Log baru saja dikosongkan, isi 1 baris jejak audit)
+      try { addLog(session.userID, adminNama, 'RESET_DATABASE', 'Reset data transaksi: ' + hasil.join(' | ')); } catch(e) {}
+      return { success: true, message: 'Reset database selesai. Users, Settings & Master Data aman.', detail: hasil };
+    } finally {
+      if (terkunci) lock.releaseLock();
+    }
+  } catch(e) {
+    return { success: false, message: e.message };
+  }
+}
+
+function getAllAbsensi(token, bulan, tahun) {
+  try {
+    requireAdmin(token);
+    const absensi = getSheetData(SHEET_NAMES.ABSENSI);
+    const filtered = absensi.filter(a => {
+      if (!a.Tanggal) return false;
+      const d = new Date(a.Tanggal);
+      return (!bulan || d.getMonth() + 1 === parseInt(bulan)) && (!tahun || d.getFullYear() === parseInt(tahun));
+    });
+    return { success: true, data: filtered };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── ADMIN: PERSETUJUAN IZIN ──────────────────────────────
+
+// ─── ADMIN: PERSETUJUAN IZIN ──────────────────────────────
+function prosesIzin(token, id, status, catatan) {
+  try {
+    const session = requireAdmin(token);
+    id = sanitize(id);
+    status = ['DISETUJUI','DITOLAK'].includes(status) ? status : null;
+    if (!status) return { success: false, message: 'Status tidak valid' };
+    catatan = sanitize(catatan);
+
+    const users = getSheetData(SHEET_NAMES.USER);
+    const admin = users.find(u => u.ID === session.userID);
+    const adminNama = admin ? admin.Nama : 'Admin';
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.IZIN);
+    const data = sh.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === id) {
+        sh.getRange(i+1, 10).setValue(status);
+        sh.getRange(i+1, 11).setValue(adminNama);
+        sh.getRange(i+1, 12).setValue(new Date());
+        sh.getRange(i+1, 13).setValue(catatan || '');
+        addLog(session.userID, adminNama, 'PROSES_IZIN', `ID: ${id} | Status: ${status}`);
+        return { success: true, message: `Izin berhasil ${status === 'DISETUJUI' ? 'disetujui' : 'ditolak'}` };
+      }
+    }
+    return { success: false, message: 'Data izin tidak ditemukan' };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── ADMIN: PERSETUJUAN KEGIATAN ──────────────────────────
+
+// ─── ADMIN: PERSETUJUAN KEGIATAN ──────────────────────────
+function prosesKegiatan(token, id, status, catatan) {
+  try {
+    const session = requireAdmin(token);
+    id = sanitize(id);
+    status = ['DISETUJUI','DITOLAK'].includes(status) ? status : null;
+    if (!status) return { success: false, message: 'Status tidak valid' };
+    catatan = sanitize(catatan);
+
+    const users = getSheetData(SHEET_NAMES.USER);
+    const admin = users.find(u => u.ID === session.userID);
+    const adminNama = admin ? admin.Nama : 'Admin';
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.KEGIATAN);
+    const data = sh.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === id) {
+        sh.getRange(i+1, 10).setValue(status);
+        sh.getRange(i+1, 11).setValue(adminNama);
+        sh.getRange(i+1, 12).setValue(new Date());
+        sh.getRange(i+1, 13).setValue(catatan || '');
+        addLog(session.userID, adminNama, 'PROSES_KEGIATAN', `ID: ${id} | Status: ${status}`);
+        return { success: true, message: `Kegiatan berhasil ${status === 'DISETUJUI' ? 'disetujui' : 'ditolak'}` };
+      }
+    }
+    return { success: false, message: 'Data kegiatan tidak ditemukan' };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── ADMIN: SEMUA IZIN & KEGIATAN ────────────────────────
+
+// ─── ADMIN: SEMUA IZIN & KEGIATAN ────────────────────────
+function getAllIzinKegiatan(token) {
+  try {
+    requireAdmin(token);
+    const izin = getSheetData(SHEET_NAMES.IZIN);
+    const kegiatan = getSheetData(SHEET_NAMES.KEGIATAN);
+    return { success: true, izin, kegiatan };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── ADMIN: SETTINGS ──────────────────────────────────────
+
+// ─── ADMIN: SETTINGS ──────────────────────────────────────
+function updateSettings(token, settings) {
+  try {
+    requireAdmin(token);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+    const data = sh.getDataRange().getValues();
+    // Whitelist key yang boleh diubah
+    const ALLOWED_KEYS = ['geo1_nama','geo1_lat','geo1_lng','geo1_radius','geo2_nama','geo2_lat','geo2_lng','geo2_radius','jam_masuk','jam_pulang','toleransi_menit','batas_laporan_menit'];
+    // Key-key yang berupa angka/koordinat harus pakai sanitizeNumber (bukan sanitize)
+    // agar tanda minus tidak terhapus pada koordinat negatif (misal -7.250445)
+    const NUMBER_KEYS = ['geo1_lat','geo1_lng','geo1_radius','geo2_lat','geo2_lng','geo2_radius','toleransi_menit','batas_laporan_menit'];
+    // Keterangan dipakai saat key belum ada di sheet (spreadsheet lama) dan perlu ditambahkan barisnya
+    const KETERANGAN_BARU = { batas_laporan_menit: 'Batas waktu isi Laporan Mengajar & Kegiatan setelah jam pulang (menit)' };
+    if (settings.some(s => s.key === 'batas_laporan_menit' && !(parseFloat(sanitizeNumber(s.value)) >= 0))) {
+      return { success: false, message: 'Batas Waktu Isi Laporan harus berupa angka 0 atau lebih' };
+    }
+    settings.forEach(s => {
+      if (!ALLOWED_KEYS.includes(s.key)) return; // [KEAMANAN] skip key tidak dikenal
+      const safeVal = NUMBER_KEYS.includes(s.key)
+        ? sanitizeNumber(s.value)   // koordinat & angka: pertahankan minus
+        : sanitize(s.value);        // teks biasa: sanitasi normal
+      let ditemukan = false;
+      for (let i = 1; i < data.length; i++) {
+        if (data[i][0] === s.key) {
+          ditemukan = true;
+          const cell = sh.getRange(i+1, 2);
+          // [FIX KRITIS] Format sel koordinat sebagai PLAIN TEXT (@)
+          // agar Sheets tidak otomatis mengubah "-7.250445" menjadi tanggal/serial number
+          if (NUMBER_KEYS.includes(s.key)) {
+            cell.setNumberFormat('@'); // set ke Text
+          }
+          cell.setValue(safeVal);
+          break;
+        }
+      }
+      if (!ditemukan) { // key baru (mis. batas_laporan_menit pada spreadsheet lama) → tambahkan barisnya
+        sh.appendRow([s.key, '', KETERANGAN_BARU[s.key] || '']);
+        const cellBaru = sh.getRange(sh.getLastRow(), 2);
+        if (NUMBER_KEYS.includes(s.key)) cellBaru.setNumberFormat('@');
+        cellBaru.setValue(safeVal);
+      }
+    });
+    addLog('ADMIN', 'Admin', 'UPDATE_SETTINGS', 'Pengaturan diperbarui');
+    return { success: true, message: 'Pengaturan berhasil disimpan!' };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+function getSettingsAll(token) {
+  try {
+    requireAdmin(token);
+    return { success: true, data: getSettings() };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── ADMIN: CRUD USERS ────────────────────────────────────
+
+// ─── ADMIN: CRUD USERS ────────────────────────────────────
+function getAllUsers(token) {
+  try {
+    requireAdmin(token);
+    const users = getSheetData(SHEET_NAMES.USER);
+    return { success: true, data: users.map(u => ({ id: u.ID, nama: u.Nama, email: u.Email, role: u.Role, nip: u.NIP, mapel: u.MapelJabatan, aktif: u.Aktif })) };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+function addUser(token, data) {
+  try {
+    requireAdmin(token);
+    const nama  = sanitize(data.nama);
+    const email = sanitize(data.email).toLowerCase();
+    const nip   = sanitize(data.nip);
+    const mapel = sanitize(data.mapel);
+    const role  = data.role === 'admin' ? 'admin' : normalRolePegawai_(data.role);
+    if (!nama || !email || !data.password) return { success: false, message: 'Nama, email, dan password wajib diisi' };
+
+    // Cek email duplikat
+    const existing = getSheetData(SHEET_NAMES.USER);
+    if (existing.find(u => u.Email === email)) return { success: false, message: 'Email sudah terdaftar' };
+
+    const id = generateID('USR');
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.USER);
+    sh.appendRow([id, nama, email, hashPassword(data.password), role, nip, mapel, 'TRUE', new Date()]);
+    addLog('ADMIN', 'Admin', 'ADD_USER', `Tambah user: ${nama}`);
+    return { success: true, message: 'User berhasil ditambahkan!' };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+function updateUser(token, data) {
+  try {
+    requireAdmin(token);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.USER);
+    const rows = sh.getDataRange().getValues();
+    const id = sanitize(data.id);
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === id) {
+        sh.getRange(i+1, 2).setValue(sanitize(data.nama));
+        sh.getRange(i+1, 3).setValue(sanitize(data.email).toLowerCase());
+        if (data.password) sh.getRange(i+1, 4).setValue(hashPassword(data.password));
+        sh.getRange(i+1, 5).setValue(data.role === 'admin' ? 'admin' : normalRolePegawai_(data.role));
+        sh.getRange(i+1, 6).setValue(sanitize(data.nip));
+        sh.getRange(i+1, 7).setValue(sanitize(data.mapel));
+        sh.getRange(i+1, 8).setValue(data.aktif === 'TRUE' ? 'TRUE' : 'FALSE');
+        addLog('ADMIN', 'Admin', 'UPDATE_USER', `Update user: ${data.nama}`);
+        return { success: true, message: 'User berhasil diperbarui!' };
+      }
+    }
+    return { success: false, message: 'User tidak ditemukan' };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+function deleteUser(token, id) {
+  try {
+    requireAdmin(token);
+    id = sanitize(id);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.USER);
+    const rows = sh.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === id) {
+        sh.deleteRow(i + 1);
+        addLog('ADMIN', 'Admin', 'DELETE_USER', `Hapus user ID: ${id}`);
+        return { success: true, message: 'User berhasil dihapus!' };
+      }
+    }
+    return { success: false, message: 'User tidak ditemukan' };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── REKAP BULANAN ────────────────────────────────────────
+
+// ─── REKAP BULANAN ────────────────────────────────────────
+function getRekapBulanan(token, bulan, tahun) {
+  try {
+    requireAdmin(token);
+    const users = getSheetData(SHEET_NAMES.USER).filter(isPegawaiAktif_);
+    const absensi = getSheetData(SHEET_NAMES.ABSENSI);
+    const izin = getSheetData(SHEET_NAMES.IZIN);
+
+    const rekap = users.map(u => {
+      const absUser = absensi.filter(a => {
+        if (a.UserID !== u.ID) return false;
+        const d = new Date(a.Tanggal);
+        return d.getMonth() + 1 === parseInt(bulan) && d.getFullYear() === parseInt(tahun);
+      });
+      const izinUser = izin.filter(a => {
+        if (a.UserID !== u.ID || a.Status !== 'DISETUJUI') return false;
+        const d = new Date(a.TanggalMulai);
+        return d.getMonth() + 1 === parseInt(bulan) && d.getFullYear() === parseInt(tahun);
+      });
+      const terlambat = absUser.filter(a => a.StatusMasuk === 'TERLAMBAT').length;
+      const pulangAwal = absUser.filter(a => a.StatusPulang === 'PULANG AWAL').length;
+      return {
+        id: u.ID, nama: u.Nama, nip: u.NIP, mapel: u.MapelJabatan,
+        hadir: absUser.length, izin: izinUser.length, terlambat, pulangAwal,
+        tidakMasuk: 0
+      };
+    });
+    return { success: true, data: rekap, bulan, tahun };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── [BARU] REKAP JAM MENGAJAR ────────────────────────────
+/**
+ * Menghitung total jam mengajar tiap guru per hari dan per bulan.
+ * Admin-only.
+ */
+
+// ─── REKAP KEHADIRAN: HELPER TANGGAL & HARI KERJA ─────────
+// Hari libur mingguan sekolah ini: Sabtu & Minggu (0=Minggu, 6=Sabtu).
+const HARI_LIBUR_MINGGUAN = [0, 6];
+const NAMA_BULAN_REKAP = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+
+function rentangBulan_(bulan, tahun) {
+  const p = x => String(x).padStart(2, '0');
+  const jumlah = new Date(Date.UTC(tahun, bulan, 0)).getUTCDate();
+  return { awal: `${tahun}-${p(bulan)}-01`, akhir: `${tahun}-${p(bulan)}-${p(jumlah)}`, jumlah };
+}
+
+/** Hari kerja otomatis sebulan: total hari dikurangi Sabtu & Minggu. */
+function hariKerjaOtomatis_(bulan, tahun) {
+  const { jumlah } = rentangBulan_(bulan, tahun);
+  let hk = 0;
+  for (let d = 1; d <= jumlah; d++) {
+    if (!HARI_LIBUR_MINGGUAN.includes(new Date(Date.UTC(tahun, bulan - 1, d)).getUTCDay())) hk++;
+  }
+  return hk;
+}
+
+// ─── REKAP KEHADIRAN: PERHITUNGAN (dipakai tampilan & export) ─────
+function hitungRekapKehadiran_(bulan, tahun, hariKerjaInput) {
+  bulan = parseInt(bulan); tahun = parseInt(tahun);
+  const rentang = rentangBulan_(bulan, tahun);
+  const hk = parseInt(hariKerjaInput) > 0 ? parseInt(hariKerjaInput) : hariKerjaOtomatis_(bulan, tahun);
+  const perJP = MENIT_PER_JP;
+  const tgl = v => v ? Utilities.formatDate(new Date(v), 'Asia/Jakarta', 'yyyy-MM-dd') : '';
+  const dalamBulan = s => s >= rentang.awal && s <= rentang.akhir;
+  const ms = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
+
+  const users    = getSheetData(SHEET_NAMES.USER).filter(isPegawaiAktif_)
+                     .sort((a, b) => String(a.Nama).localeCompare(String(b.Nama), 'id'));
+  const absensi  = getSheetData(SHEET_NAMES.ABSENSI);
+  const izin     = getSheetData(SHEET_NAMES.IZIN).filter(i => i.Status === 'DISETUJUI');
+  // Kegiatan sejak Tahap 3 langsung DISETUJUI otomatis (tanpa approval); kegiatan lama yang
+  // sempat ditolak admin (DITOLAK) tetap dikecualikan. MENUNGGU lama (sisa sebelum perubahan
+  // itu) dianggap tetap terhitung, karena tidak ada lagi proses yang akan memprosesnya.
+  const kegiatan = getSheetData(SHEET_NAMES.KEGIATAN).filter(k => k.Status !== 'DITOLAK');
+  const laporan  = getSheetData(SHEET_NAMES.LAPORAN);
+
+  const data = users.map((u, idx) => {
+    // Hadir dihitung per HARI (bukan per baris Absensi), jadi baris ganda tidak menggelembungkan angka.
+    const hari = {};
+    absensi.forEach(a => {
+      if (a.UserID !== u.ID || !a.WaktuMasuk) return;
+      const t = tgl(a.Tanggal);
+      if (!dalamBulan(t)) return;
+      const h = hari[t] || (hari[t] = { telat: false, cepat: false });
+      if (a.StatusMasuk === 'TERLAMBAT') h.telat = true;
+      if (a.StatusPulang === 'PULANG AWAL') h.cepat = true;
+    });
+    const tglHadir = Object.keys(hari);
+
+    // Izin yang DISETUJUI: hitung per hari kerja di bulan ini (dipotong ke batas bulan),
+    // kecuali hari yang tetap hadir atau sudah terhitung izin lain di hari yang sama.
+    const kat = { sakit: 0, keluarga: 0, cuti: 0, dinas: 0 };
+    const terpakai = {};
+    izin.forEach(i => {
+      if (i.UserID !== u.ID) return;
+      const jenis = String(i.JenisIzin || '');
+      const key = jenis === 'Sakit' ? 'sakit'
+                : jenis === 'Cuti' ? 'cuti'
+                : (jenis === 'Tugas Dinas' || jenis === 'Rapat/Seminar') ? 'dinas'
+                : 'keluarga'; // Izin Pribadi & Lainnya
+      let mulai = tgl(i.TanggalMulai);
+      let selesai = tgl(i.TanggalSelesai) || mulai;
+      if (!mulai) return;
+      if (mulai < rentang.awal) mulai = rentang.awal;
+      if (selesai > rentang.akhir) selesai = rentang.akhir;
+      for (let t = ms(mulai); t <= ms(selesai); t += 86400000) {
+        const s = new Date(t).toISOString().slice(0, 10);
+        if (HARI_LIBUR_MINGGUAN.includes(new Date(t).getUTCDay()) || hari[s] || terpakai[s]) continue;
+        terpakai[s] = true;
+        kat[key]++;
+      }
+    });
+
+    const alpha = Math.max(0, hk - tglHadir.length - kat.sakit - kat.keluarga - kat.cuti - kat.dinas);
+    const menit = laporan
+      .filter(l => l.UserID === u.ID && dalamBulan(tgl(l.Tanggal)))
+      .reduce((s, l) => s + hitungDurasiMenit(l.JamMulai, l.JamSelesai), 0);
+
+    // Riwayat harian presensi & izin pegawai untuk modal rincian
+    const riwayatMap = {};
+    absensi.forEach(a => {
+      if (a.UserID !== u.ID || !a.WaktuMasuk) return;
+      const t = tgl(a.Tanggal);
+      if (!dalamBulan(t)) return;
+      const masukStr = a.WaktuMasuk ? Utilities.formatDate(new Date(a.WaktuMasuk), 'Asia/Jakarta', 'HH:mm') : '—';
+      const pulangStr = a.WaktuPulang ? Utilities.formatDate(new Date(a.WaktuPulang), 'Asia/Jakarta', 'HH:mm') : '—';
+      let st = 'HADIR';
+      if (a.StatusMasuk === 'TERLAMBAT' && a.StatusPulang === 'PULANG AWAL') st = 'TERLAMBAT & PULANG AWAL';
+      else if (a.StatusMasuk === 'TERLAMBAT') st = 'TERLAMBAT';
+      else if (a.StatusPulang === 'PULANG AWAL') st = 'PULANG AWAL';
+      else if (a.StatusMasuk === 'TEPAT WAKTU') st = 'HADIR TEPAT WAKTU';
+
+      riwayatMap[t] = {
+        tanggal: t,
+        waktuMasuk: masukStr,
+        waktuPulang: pulangStr,
+        status: st,
+        tipe: 'HADIR',
+        lokasi: a.LokasiMasuk || a.Lokasi || '—',
+        keterangan: (a.StatusMasuk === 'TERLAMBAT' ? 'Terlambat' : '') + (a.StatusPulang === 'PULANG AWAL' ? (a.StatusMasuk === 'TERLAMBAT' ? ', Pulang awal' : 'Pulang awal') : '') || 'Hadir'
+      };
+    });
+
+    izin.forEach(i => {
+      if (i.UserID !== u.ID) return;
+      let mulai = tgl(i.TanggalMulai);
+      let selesai = tgl(i.TanggalSelesai) || mulai;
+      if (!mulai) return;
+      if (mulai < rentang.awal) mulai = rentang.awal;
+      if (selesai > rentang.akhir) selesai = rentang.akhir;
+      for (let t = ms(mulai); t <= ms(selesai); t += 86400000) {
+        const s = new Date(t).toISOString().slice(0, 10);
+        if (HARI_LIBUR_MINGGUAN.includes(new Date(t).getUTCDay())) continue;
+        if (!riwayatMap[s]) {
+          riwayatMap[s] = {
+            tanggal: s,
+            waktuMasuk: '—',
+            waktuPulang: '—',
+            status: String(i.JenisIzin || 'IZIN').toUpperCase(),
+            tipe: 'IZIN',
+            lokasi: '—',
+            keterangan: i.Keterangan || i.JenisIzin || 'Izin'
+          };
+        }
+      }
+    });
+
+    const riwayatHarian = Object.keys(riwayatMap).sort().map(k => riwayatMap[k]);
+
+    return {
+      no: idx + 1, id: u.ID, nama: u.Nama, nip: u.NIP || '', mapel: u.MapelJabatan || '',
+      hariKerja: hk, hadir: tglHadir.length,
+      telat: tglHadir.filter(t => hari[t].telat).length,
+      pulangCepat: tglHadir.filter(t => hari[t].cepat).length,
+      alpha,
+      izinSakit: kat.sakit, izinKeluarga: kat.keluarga, cuti: kat.cuti, penugasanLuar: kat.dinas,
+      totalKegiatan: kegiatan.filter(k => k.UserID === u.ID && dalamBulan(tgl(k.TanggalKegiatan))).length,
+      totalJamMengajar: menitKeJP(menit, perJP), // dalam JP (1 JP = 30 menit, konsisten dgn Rekap Jam Mengajar)
+      riwayatHarian
+    };
+  });
+  return { data, hariKerja: hk };
+}
+
+function getRekapKehadiran(token, bulan, tahun, hariKerja) {
+  try {
+    requireAdmin(token);
+    const r = hitungRekapKehadiran_(bulan, tahun, hariKerja);
+    return { success: true, data: r.data, hariKerja: r.hariKerja, bulan: parseInt(bulan), tahun: parseInt(tahun), menitPerJP: MENIT_PER_JP };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+function exportRekapToSheet(token, bulan, tahun, hariKerja) {
+  try {
+    requireAdmin(token);
+    bulan = parseInt(bulan); tahun = parseInt(tahun);
+    const r = hitungRekapKehadiran_(bulan, tahun, hariKerja);
+    if (!r.data.length) return { success: false, message: 'Tidak ada data pegawai untuk diekspor' };
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const namaSheet = `Rekap Kehadiran ${NAMA_BULAN_REKAP[bulan - 1]} ${tahun}`;
+    let sh = ss.getSheetByName(namaSheet);
+    if (sh) sh.clear(); else sh = ss.insertSheet(namaSheet);
+
+    const header = ['NO','NAMA','NIP/NIK','JENIS PTK','HARI KERJA','HADIR','TELAT','PULANG CEPAT','TANPA KET.','IZIN SAKIT','IZIN KELUARGA','CUTI','PENUGASAN LUAR','KEGIATAN','JAM MENGAJAR (JP)'];
+    const rows = r.data.map(x => [x.no, x.nama, x.nip, x.mapel, x.hariKerja, x.hadir, x.telat, x.pulangCepat, x.alpha, x.izinSakit, x.izinKeluarga, x.cuti, x.penugasanLuar, x.totalKegiatan, x.totalJamMengajar]);
+
+    sh.getRange('A1').setValue('LAPORAN REKAPITULASI KEHADIRAN PEGAWAI').setFontWeight('bold').setFontSize(13);
+    sh.getRange('A2').setValue(`Periode: ${NAMA_BULAN_REKAP[bulan - 1]} ${tahun}`);
+    sh.getRange('A3').setValue(`Hari kerja efektif: ${r.hariKerja} hari | 1 JP = ${MENIT_PER_JP} menit`);
+    sh.getRange(5, 1, 1, header.length).setValues([header])
+      .setFontWeight('bold').setBackground('#1a237e').setFontColor('#ffffff').setHorizontalAlignment('center');
+    sh.getRange(6, 3, rows.length, 1).setNumberFormat('@'); // NIP tetap teks
+    sh.getRange(6, 1, rows.length, header.length).setValues(rows);
+    sh.getRange(6, 5, rows.length, header.length - 4).setHorizontalAlignment('center');
+    sh.getRange(6, 2, rows.length, 3).setHorizontalAlignment('left');
+    sh.setFrozenRows(5);
+    sh.autoResizeColumns(1, header.length);
+
+    addLog('ADMIN', 'Admin', 'EXPORT_REKAP_KEHADIRAN', `${namaSheet} | Hari kerja: ${r.hariKerja}`);
+    return { success: true, message: `Rekap berhasil diekspor ke sheet "${namaSheet}". Buka spreadsheet untuk melihat atau mencetaknya.`, sheet: namaSheet, url: ss.getUrl() + '#gid=' + sh.getSheetId() };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+// ─── REKAP JAM MENGAJAR ───────────────────────────────────
+// Format Jam / Sesi (Contoh: 07.15 - 08.45 / Sesi 1-2)
+function formatJamSesi_(jamMulai, jamSelesai, durasi, perJP, jpCount) {
+  if (!jamMulai && !jamSelesai) return '—';
+  const jm = String(jamMulai || '').trim().replace(':', '.');
+  const js = String(jamSelesai || '').trim().replace(':', '.');
+  const rentangJam = (jm && js) ? (jm + ' - ' + js) : (jm || js || '—');
+  if (!jamMulai) return rentangJam;
+
+  const m = jamKeMenit(jamMulai);
+  let startSesi = 1;
+  if (m <= 465) startSesi = 1;        // s/d 07:45 (sesi 1 mulai ~07.00 - 07.15)
+  else if (m <= 510) startSesi = 2;   // 07:46 - 08:30
+  else if (m <= 555) startSesi = 3;   // 08:31 - 09:15
+  else if (m <= 600) startSesi = 4;   // 09:16 - 10:00
+  else if (m <= 650) startSesi = 5;   // 10:01 - 10:50
+  else if (m <= 700) startSesi = 6;   // 10:51 - 11:40
+  else if (m <= 780) startSesi = 7;   // 11:41 - 13:00
+  else if (m <= 825) startSesi = 8;   // 13:01 - 13:45
+  else if (m <= 870) startSesi = 9;   // 13:46 - 14:30
+  else if (m <= 915) startSesi = 10;  // 14:31 - 15:15
+  else startSesi = Math.max(1, Math.floor((m - 420) / 45) + 1);
+
+  let span = 1;
+  if (jpCount && jpCount >= 1) {
+    span = Math.round(jpCount);
+  } else if (durasi && durasi > 0) {
+    span = Math.max(1, Math.round(durasi / (perJP || 45)));
+  }
+
+  const sesiLabel = (span <= 1) ? `Sesi ${startSesi}` : `Sesi ${startSesi}-${startSesi + span - 1}`;
+  return `${rentangJam} / ${sesiLabel}`;
+}
+
+// ─── REKAP JAM MENGAJAR: PERHITUNGAN (dipakai tampilan & export) ──
+function hitungRekapJamMengajar_(bulan, tahun) {
+  const perJP = MENIT_PER_JP;
+  const users = getSheetData(SHEET_NAMES.USER).filter(isPegawaiAktif_);
+  const laporan = getSheetData(SHEET_NAMES.LAPORAN);
+
+  // Filter laporan sesuai bulan & tahun
+  const laporanBulan = laporan.filter(l => {
+    if (!l.Tanggal) return false;
+    const d = new Date(l.Tanggal);
+    return d.getMonth() + 1 === parseInt(bulan) && d.getFullYear() === parseInt(tahun);
+  });
+
+  const rekap = users.map(u => {
+    const lapUser = laporanBulan.filter(l => l.UserID === u.ID);
+
+    // Hitung total menit per hari
+    const perHari = {};
+    lapUser.forEach(l => {
+      const tgl = Utilities.formatDate(new Date(l.Tanggal), 'Asia/Jakarta', 'yyyy-MM-dd');
+      const menit = hitungDurasiMenit(l.JamMulai, l.JamSelesai);
+      if (!perHari[tgl]) perHari[tgl] = { menit: 0, sesi: 0 };
+      perHari[tgl].menit += menit;
+      perHari[tgl].sesi += 1;
+    });
+
+    // Total bulan
+    const totalMenitBulan = lapUser.reduce((sum, l) => sum + hitungDurasiMenit(l.JamMulai, l.JamSelesai), 0);
+    const totalSesiBulan  = lapUser.length;
+
+    // Detail harian (array, diurutkan by tanggal)
+    const harian = Object.keys(perHari).sort().map(tgl => ({
+      tanggal: tgl,
+      menitHari: perHari[tgl].menit,
+      jpHari: menitKeJP(perHari[tgl].menit, perJP),
+      jpLabel: formatJP(perHari[tgl].menit, perJP),
+      sesiHari: perHari[tgl].sesi
+    }));
+
+    // Detail mengajar (array per sesi mengajar, diurutkan tanggal & jam)
+    const detailMengajar = lapUser.map(l => {
+      const tgl = Utilities.formatDate(new Date(l.Tanggal), 'Asia/Jakarta', 'yyyy-MM-dd');
+      const menit = hitungDurasiMenit(l.JamMulai, l.JamSelesai);
+      const jpValue = menitKeJP(menit, perJP);
+      const jpText = formatJP(menit, perJP);
+      const jamMulai = l.JamMulai ? String(l.JamMulai).trim() : '';
+      const jamSelesai = l.JamSelesai ? String(l.JamSelesai).trim() : '';
+      return {
+        id: l.ID,
+        tanggal: tgl,
+        jamMulai: jamMulai,
+        jamSelesai: jamSelesai,
+        jamSesi: formatJamSesi_(jamMulai, jamSelesai, menit, perJP, jpValue),
+        kelas: l.Kelas || '—',
+        mapel: l.Mapel || u.MapelJabatan || '—',
+        durasiMenit: menit,
+        jp: jpValue,
+        jpLabel: jpText,
+        materi: l.Materi || ''
+      };
+    }).sort((a, b) => {
+      const cmp = a.tanggal.localeCompare(b.tanggal);
+      if (cmp !== 0) return cmp;
+      return jamKeMenit(a.jamMulai) - jamKeMenit(b.jamMulai);
+    });
+
+    return {
+      id: u.ID,
+      nama: u.Nama,
+      nip: u.NIP,
+      mapel: u.MapelJabatan,
+      totalMenitBulan,
+      totalJP: menitKeJP(totalMenitBulan, perJP),
+      totalJPLabel: formatJP(totalMenitBulan, perJP),
+      totalSesiBulan,
+      harian,
+      detailMengajar
+    };
+  });
+
+  return rekap;
+}
+
+function getRekapJamMengajar(token, bulan, tahun) {
+  try {
+    requireAdmin(token);
+    const rekap = hitungRekapJamMengajar_(bulan, tahun);
+    return { success: true, data: rekap, bulan, tahun, menitPerJP: MENIT_PER_JP };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+function exportRekapJamMengajarToSheet(token, bulan, tahun) {
+  try {
+    requireAdmin(token);
+    bulan = parseInt(bulan); tahun = parseInt(tahun);
+    const data = hitungRekapJamMengajar_(bulan, tahun);
+    if (!data.length) return { success: false, message: 'Tidak ada data laporan mengajar untuk diekspor' };
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const namaSheet = `Rekap Jam Mengajar ${NAMA_BULAN_REKAP[bulan - 1]} ${tahun}`;
+    let sh = ss.getSheetByName(namaSheet);
+    if (sh) sh.clear(); else sh = ss.insertSheet(namaSheet);
+
+    const header = ['NO','NIP/NIK','NAMA','MATA PELAJARAN/JABATAN','SESI/BULAN','TOTAL JP/BULAN'];
+    const rows = data.map((x, i) => [i + 1, x.nip || '', x.nama, x.mapel || '', x.totalSesiBulan, x.totalJP]);
+
+    sh.getRange('A1').setValue('REKAP JAM MENGAJAR GURU & STAFF').setFontWeight('bold').setFontSize(13);
+    sh.getRange('A2').setValue(`Periode: ${NAMA_BULAN_REKAP[bulan - 1]} ${tahun}`);
+    sh.getRange('A3').setValue(`1 JP = ${MENIT_PER_JP} menit`);
+    sh.getRange(5, 1, 1, header.length).setValues([header])
+      .setFontWeight('bold').setBackground('#1a237e').setFontColor('#ffffff').setHorizontalAlignment('center');
+    sh.getRange(6, 2, rows.length, 1).setNumberFormat('@'); // NIP tetap teks
+    sh.getRange(6, 1, rows.length, header.length).setValues(rows);
+    sh.getRange(6, 5, rows.length, 2).setHorizontalAlignment('center');
+    sh.getRange(6, 3, rows.length, 1).setHorizontalAlignment('left');
+    sh.setFrozenRows(5);
+    sh.autoResizeColumns(1, header.length);
+
+    addLog('ADMIN', 'Admin', 'EXPORT_REKAP_JAM', `${namaSheet}`);
+    return { success: true, message: `Rekap berhasil diekspor ke sheet "${namaSheet}". Buka spreadsheet untuk melihat atau mencetaknya.`, sheet: namaSheet, url: ss.getUrl() + '#gid=' + sh.getSheetId() };
+  } catch(e) { return { success: false, message: e.message }; }
+}
+
+
+// ─── USER: UPDATE PROFIL SENDIRI ─────────────────────────
+/**
+ * Memungkinkan user mengubah nama, NIP, jabatan/mapel,
+ * dan password miliknya sendiri.
+ * Token wajib valid; userID diambil dari session (bukan dari client).
+ */
+
+// ─── ALAT BANTU SEKALI JALAN: LAPORKAN LAPORAN MENGAJAR YANG BENTROK ───
+/**
+ * Jalankan MANUAL dari editor Apps Script (pilih fungsi ini → Run → lihat Execution log).
+ * Hanya MELAPORKAN baris LaporanMengajar milik guru yang sama, di tanggal yang sama, yang jamnya
+ * beririsan (sisa data dobel sebelum aturan baru dipasang). TIDAK menghapus atau mengubah apa pun;
+ * hapus manual di sheet setelah dicek.
+ */
+function cekLaporanDobel() {
+  const tz = 'Asia/Jakarta';
+  const rows = getSheetData(SHEET_NAMES.LAPORAN).map((l, i) => ({
+    baris: i + 2, userID: l.UserID, nama: l.Nama, mapel: l.Mapel || '-', kelas: l.Kelas || '-',
+    tanggal: l.Tanggal ? Utilities.formatDate(new Date(l.Tanggal), tz, 'yyyy-MM-dd') : '',
+    m: jamKeMenit(l.JamMulai), s: jamKeMenit(l.JamSelesai)
+  })).filter(r => r.tanggal && r.s > r.m);
+
+  const grup = {};
+  rows.forEach(r => (grup[r.userID + '|' + r.tanggal] = grup[r.userID + '|' + r.tanggal] || []).push(r));
+
+  let ditemukan = 0;
+  Object.keys(grup).forEach(k => {
+    const g = grup[k].sort((a, b) => a.m - b.m);
+    for (let i = 0; i < g.length; i++) {
+      for (let j = i + 1; j < g.length; j++) {
+        if (g[j].m < g[i].s && g[j].s > g[i].m) {
+          ditemukan++;
+          Logger.log(`Baris ${g[i].baris} & ${g[j].baris} | ${g[i].nama} | ${g[i].tanggal} | ${menitKeStr(g[i].m)}-${menitKeStr(g[i].s)} (${g[i].mapel}, ${g[i].kelas}) bentrok dengan ${menitKeStr(g[j].m)}-${menitKeStr(g[j].s)} (${g[j].mapel}, ${g[j].kelas})`);
+        }
+      }
+    }
+  });
+  Logger.log(ditemukan ? `Selesai: ${ditemukan} pasangan baris bentrok. Hapus salah satunya secara manual.` : 'Selesai: tidak ada laporan yang bentrok.');
+}

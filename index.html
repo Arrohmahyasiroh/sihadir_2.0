@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SIHADIR - Sistem Absensi Geofencing</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<?!= include('style'); ?>
+
+</head>
+<body>
+
+<!-- TOAST -->
+<div id="toast-container"></div>
+
+<!-- LOADING -->
+<div id="loading-screen">
+  <div class="loader-logo">SI<span>HADIR</span></div>
+  <div class="loader-sub">Sistem Absensi Geofencing</div>
+  <div class="loader-bar"><div class="loader-fill"></div></div>
+</div>
+
+<!-- LOGIN -->
+<div id="login-page" class="hidden">
+  <div class="login-card">
+    <div class="login-logo">
+      <div id="logo-wrap" style="display:flex;align-items:center;justify-content:center;margin-bottom:10px;">
+        <img id="logo-img" src="" alt="Logo Sekolah" style="max-width:80px;max-height:80px;object-fit:contain;border-radius:12px;display:none;"
+          onerror="this.style.display='none';document.getElementById('logo-icon-fallback').style.display='flex'"/>
+        <div class="login-logo-icon" id="logo-icon-fallback"><i class="fas fa-map-marked-alt"></i></div>
+      </div>
+      <div class="login-title" id="app-title">SIHADIR</div>
+      <div class="login-sub" id="app-subtitle">Sistem Absensi Geofencing Sekolah</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Email</label>
+      <div class="input-icon-wrap">
+        <i class="fas fa-envelope input-icon"></i>
+        <input type="email" id="login-email" class="form-input" placeholder="email@sekolah.id" autocomplete="off"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Password</label>
+      <div class="input-icon-wrap" style="position:relative;">
+        <i class="fas fa-lock input-icon"></i>
+        <input type="password" id="login-pass" class="form-input has-right-icon" placeholder="••••••••"/>
+        <button type="button" class="input-icon-right" id="btn-toggle-pass" onclick="togglePassword()" title="Lihat/Sembunyikan password">
+          <i class="fas fa-eye" id="pass-eye-icon"></i>
+        </button>
+      </div>
+    </div>
+    <button class="btn btn-primary btn-full" id="btn-login" onclick="doLogin()">
+      <i class="fas fa-sign-in-alt"></i> Masuk ke Sistem
+    </button>
+    <div style="text-align:center;margin-top:16px;font-size:.75rem;color:var(--c-text-muted);">
+      Hubungi administrator jika lupa password.
+    </div>
+    <div style="margin-top:12px;padding:10px 12px;background:rgba(26,35,126,.06);border-radius:8px;font-size:.72rem;color:var(--c-text-muted);display:flex;align-items:center;gap:6px;">
+      <i class="fas fa-shield-alt" style="color:var(--c-primary);"></i>
+      Sistem dilindungi enkripsi password & pembatasan percobaan login.
+    </div>
+  </div>
+</div>
+
+<!-- APP SHELL -->
+<div id="app">
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-title" id="sidebar-app-title">SI<span>HADIR</span></div>
+      <div class="sidebar-logo-sub">Geofencing Attendance System</div>
+    </div>
+    <div class="sidebar-user">
+      <div class="sidebar-user-name" id="sb-user-name">—</div>
+      <div class="sidebar-user-role" id="sb-user-role">—</div>
+    </div>
+    <!-- USER NAV -->
+    <nav class="sidebar-nav" id="nav-user">
+      <div class="nav-section-title">Menu Utama</div>
+      <div class="nav-item active" onclick="showPage('absen')">
+        <span class="nav-icon"><i class="fas fa-fingerprint"></i></span> Absensi
+      </div>
+      <div class="nav-section-title">Aktivitas</div>
+      <div class="nav-item" id="nav-laporan" onclick="showPage('laporan')">
+        <span class="nav-icon"><i class="fas fa-chalkboard-teacher"></i></span> Laporan Mengajar
+      </div>
+      <div class="nav-item" onclick="showPage('izin')">
+        <span class="nav-icon"><i class="fas fa-file-alt"></i></span> Izin
+      </div>
+      <div class="nav-item" onclick="showPage('kegiatan')">
+        <span class="nav-icon"><i class="fas fa-calendar-check"></i></span> Kegiatan
+      </div>
+      <div class="nav-section-title">Riwayat</div>
+      <div class="nav-item" onclick="showPage('log')">
+        <span class="nav-icon"><i class="fas fa-history"></i></span> Riwayat Saya
+      </div>
+      <div class="nav-section-title">Akun</div>
+      <div class="nav-item" onclick="showPage('profil')">
+        <span class="nav-icon"><i class="fas fa-user-cog"></i></span> Profil &amp; Password
+      </div>
+    </nav>
+    <!-- ADMIN NAV -->
+    <nav class="sidebar-nav hidden" id="nav-admin">
+      <div class="nav-section-title">Dashboard</div>
+      <div class="nav-item active" onclick="showPage('dashboard')">
+        <span class="nav-icon"><i class="fas fa-tachometer-alt"></i></span> Dashboard
+      </div>
+      <div class="nav-section-title">Manajemen</div>
+      <div class="nav-item" onclick="showPage('approval')">
+        <span class="nav-icon"><i class="fas fa-clipboard-check"></i></span> Persetujuan
+        <span class="nav-badge" id="badge-approval">0</span>
+      </div>
+      <div class="nav-item" onclick="showPage('rekap')">
+        <span class="nav-icon"><i class="fas fa-chart-bar"></i></span> Rekap Kehadiran
+      </div>
+      <div class="nav-item" onclick="showPage('rekap-jam')">
+        <span class="nav-icon"><i class="fas fa-business-time"></i></span> Rekap Jam Mengajar
+      </div>
+      <div class="nav-item" onclick="showPage('admin-absensi')">
+        <span class="nav-icon"><i class="fas fa-table"></i></span> Data Absensi
+      </div>
+      <div class="nav-section-title">Pengaturan</div>
+      <div class="nav-item" onclick="showPage('crud-user')">
+        <span class="nav-icon"><i class="fas fa-users-cog"></i></span> Data Guru/User
+      </div>
+      <div class="nav-item" onclick="showPage('master')">
+        <span class="nav-icon"><i class="fas fa-database"></i></span> Master Data
+      </div>
+      <div class="nav-item" onclick="showPage('settings')">
+        <span class="nav-icon"><i class="fas fa-map-pin"></i></span> Setting Geofencing
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn btn-ghost btn-full" onclick="doLogout()" style="font-size:.8rem;">
+        <i class="fas fa-sign-out-alt"></i> Keluar
+      </button>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main-content">
+    <div class="topbar">
+      <div class="flex items-center gap-3">
+        <button class="hamburger" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
+        <div>
+          <div class="topbar-title" id="page-title">Absensi</div>
+          <div id="live-clock">—</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="badge badge-info" id="topbar-role">User</span>
+        <span style="font-size:.82rem;color:var(--c-text-muted);" id="topbar-name">—</span>
+      </div>
+    </div>
+    <div class="page-body" id="page-body"></div>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay hidden" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<?!= include('js-core'); ?>
+<?!= include('js-user'); ?>
+<?!= include('js-admin'); ?>
+<!-- PENGAMAN DARURAT: kalau salah satu file js-*.html di atas gagal parse (mis. lupa
+     deploy/salah paste), window.__sihadir_boot tidak akan ada. Script kecil ini jalan
+     TERAKHIR dan mandiri — ia paksa loading hilang setelah 5 detik supaya user tetap
+     bisa lihat pesan error-nya, bukan macet di layar loading selamanya. -->
+<script>
+setTimeout(function () {
+  if (!window.__sihadir_booted) {
+    var l = document.getElementById('loading-screen');
+    var login = document.getElementById('login-page');
+    if (l) { l.style.opacity = '0'; setTimeout(function(){ l.style.display = 'none'; }, 400); }
+    if (login) login.classList.remove('hidden');
+    var t = document.getElementById('toast-container');
+    if (t) {
+      var d = document.createElement('div');
+      d.className = 'toast error';
+      d.innerHTML = '<i class="fas fa-times-circle"></i><span>Ada file script yang gagal dimuat (cek paste js-core/js-user/js-admin di Apps Script).</span>';
+      t.appendChild(d);
+    }
+  }
+}, 5000);
+</script>
+</body>
+</html>
